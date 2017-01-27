@@ -26,6 +26,7 @@ end type tCell
 
 type, private :: tData
 
+  logical :: MonteCarlo                   ! True if Monte Carlo instead of Molecular Dynamics
   integer :: natoms                       ! Number of atoms in the system
   integer :: mcells = 0                   ! Number of cells at each dimension
   integer :: ncells = 0                   ! Total number of cells
@@ -55,9 +56,11 @@ type, private :: tData
 end type tData
 
 type, bind(C) :: nbList
-  type(c_ptr) :: first
-  type(c_ptr) :: last
-  type(c_ptr) :: item
+  type(c_ptr) :: first                     ! Location of the first neighbor of each atom
+  type(c_ptr) :: last                      ! Location of the last neighbor of each atom
+  type(c_ptr) :: item                      ! Indices of neighbor atoms
+  integer(ib) :: nitems                    ! Number of atoms in neighbor list
+  integer(ib) :: nmax                      ! Maximum number of atoms in neighbor list
   integer(ib) :: builds                    ! Number of neighbor list builds
   real(rb)    :: time                      ! Time taken in neighbor list handling
   type(c_ptr) :: Data                      ! Pointer to system data
@@ -69,21 +72,29 @@ contains
 !                                L I B R A R Y   P R O C E D U R E S
 !===================================================================================================
 
-  function neighbor_list( threads, rc, skin, N, body ) bind(C,name="neighbor_list")
+  function neighbor_list( threads, rc, skin, N, body, MC ) bind(C,name="neighbor_list")
     integer(ib), value :: threads, N
     real(rb),    value :: rc, skin
     type(c_ptr), value :: body
+    integer(ib), value :: MC
     type(nbList)       :: neighbor_list
 
     integer :: i
 
     type(tData), pointer :: me
-    integer,     pointer :: pbody(:)
+    integer,     pointer :: pbody(:), first(:), last(:)
 
     ! Allocate data structure:
     allocate( me )
+    allocate( first(N), last(N), source = 0 )
+    neighbor_list % data = c_loc(me)
+    neighbor_list % first = c_loc(first)
+    neighbor_list % last = c_loc(last)
+    neighbor_list % item = c_null_ptr
+    neighbor_list % nitems = 0
 
     ! Set up fixed entities:
+    me%MonteCarlo = MC /= 0
     me%nthreads = threads
     me%Rc = rc
     me%RcSq = rc*rc
@@ -103,8 +114,7 @@ contains
 
     ! Initialize counters and other mutable entities:
     allocate( me%R0(3,N), source = zero )
-    allocate( me%cell(0) )
-    allocate( me%atomCell(N) )
+    allocate( me%cell(0), me%atomCell(N) )
 
     ! Allocate memory for list of atoms per cell:
     call me % cellAtom % allocate( N, 0 )
@@ -113,10 +123,148 @@ contains
     allocate( me%neighbor(threads) )
     call me % neighbor % allocate( extra, N )
 
-    ! Set up mutable entities:
-    neighbor_list % data = c_loc(me)
-
   end function neighbor_list
+
+!===================================================================================================
+
+  subroutine neighbor_handle( list, Lbox, positions ) bind(C,name="neighbor_handle")
+    type(nbList), intent(inout) :: list
+    real(rb),     value         :: Lbox
+    type(c_ptr),  value         :: positions
+
+    integer  :: M, i, n
+    real(rb) :: invL, time
+    logical  :: buildList
+    integer, allocatable  :: neighbors(:,:)
+    integer,  pointer     :: first(:), last(:), item(:)
+    real(rb), pointer     :: R(:,:)
+    real(rb), allocatable :: Rs(:,:)
+    type(tData),  pointer :: me
+
+    call c_f_pointer( list%data, me )
+    list%time = list%time - omp_get_wtime()
+
+    call c_f_pointer( positions, R, [3,me%natoms])
+
+    buildList = maximum_approach_sq( me%natoms, R - me%R0 ) > me%skinSq
+    if (buildList) then
+      M = floor(ndiv*Lbox/me%xRc)
+      allocate( Rs(3,me%natoms) )
+      invL = one/Lbox
+      Rs = invL*R
+      call distribute_atoms( me, max(M,2*ndiv+1), Rs )
+
+      allocate( neighbors(me%natoms,me%nthreads) )
+
+      !$omp parallel num_threads(me%nthreads)
+      block
+        integer :: thread
+        thread = omp_get_thread_num() + 1
+
+        ! Search for all atom pairs within the extended cutoff distance:
+        call find_pairs( me, thread, InvL, Rs )
+
+        ! Update reference positions and count neighbors of each atom:
+        call update_reference_and_count_neighbors( me, thread, R, neighbors(:,thread) )
+
+      end block
+      !$omp end parallel
+
+      call c_f_pointer( list%first, first, [me%natoms] )
+      call c_f_pointer( list%last, last, [me%natoms] )
+      call c_f_pointer( list%item, item, [list%nmax] )
+
+      ! Sum up neighbors counted in different threads:
+      n = 0
+      do i = 1, me%natoms
+        first(i) = n + 1
+        n = n + sum(neighbors(i,:))
+        last(i) = n
+      end do
+
+      ! Reallocate list%item if necessary:
+      if (list%nmax < n) then
+        list%nmax = n
+        deallocate( item )
+        allocate( item(n) )
+        list%item = c_loc(item)
+      end if
+
+      ! Update neighbor list:
+      call update_neighbor_list( me, first, last, item )
+
+      list%builds = list%builds + 1
+    endif
+
+    time = omp_get_wtime()
+    list%time = list%time + time
+
+    contains
+
+
+  end subroutine neighbor_handle
+
+!===================================================================================================
+!                              A U X I L I A R Y   P R O C E D U R E S
+!===================================================================================================
+
+  pure subroutine update_reference_and_count_neighbors( me, thread, R, ncount )
+    type(tData), intent(inout) :: me
+    integer,     intent(in)    :: thread
+    real(rb),    intent(in)    :: R(3,me%natoms)
+    integer,     intent(out)   :: ncount(me%natoms)
+
+    integer :: firstAtom, lastAtom, m, i, j, k
+
+    ncount = 0
+    firstAtom = me%cellAtom%first(me%threadCell%first(thread))
+    lastAtom = me%cellAtom%last(me%threadCell%last(thread))
+    associate (neighbor => me%neighbor(thread) )
+      do m = firstAtom, lastAtom
+        i = me%cellAtom%item(m)
+        me%R0(:,i) = R(:,i)
+        ncount(i) = ncount(i) + neighbor%last(i) - neighbor%first(i) + 1
+        if (me%MonteCarlo) then
+          do k = neighbor%first(i), neighbor%last(i)
+            j = neighbor%item(k)
+            ncount(j) = ncount(j) + 1
+          end do
+        end if
+      end do
+    end associate
+
+  end subroutine update_reference_and_count_neighbors
+
+!===================================================================================================
+
+  subroutine update_neighbor_list( me, first, last, item )
+    type(tData), intent(inout) :: me
+    integer,     intent(in)    :: first(me%natoms), last(me%natoms)
+    integer,     intent(out)   :: item(:)
+
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread, firstAtom, lastAtom, m, i, j, k
+      thread = omp_get_thread_num() + 1
+
+      firstAtom = me%cellAtom%first(me%threadCell%first(thread))
+      lastAtom = me%cellAtom%last(me%threadCell%last(thread))
+      associate (neighbor => me%neighbor(thread) )
+        do m = firstAtom, lastAtom
+          i = me%cellAtom%item(m)
+          do k = neighbor%first(i), neighbor%last(i)
+            j = neighbor%item(k)
+            ! TODO: Add atom j in the neighbor list of i:
+            if (me%MonteCarlo) then
+              ! TODO: Add atom i in the neighbor list of j:
+            end if
+          end do
+        end do
+      end associate
+    end block
+    !$omp end parallel
+
+  end subroutine update_neighbor_list
 
 !===================================================================================================
 
@@ -179,7 +327,7 @@ contains
         integer, intent(in)  :: thread
         integer, intent(out) :: maxNatoms
 
-        integer :: i, k, icell, ix, iy, iz, first, last, atoms_per_thread
+        integer :: i, k, icell, ix, iy, iz, first, last
         integer :: icoord(3)
         integer, allocatable :: head(:)
 
@@ -200,8 +348,7 @@ contains
           last = me%threadCell%last(thread)
         end if
 
-        atoms_per_thread = (me%natoms + me%nthreads - 1)/me%nthreads
-        do i = (thread - 1)*atoms_per_thread + 1, min( thread*atoms_per_thread, me%natoms )
+        do i = (thread - 1)*me%threadAtoms + 1, min( thread*me%threadAtoms, me%natoms )
           icoord = int(M*(Rs(:,i) - floor(Rs(:,i))),ib)
           me%atomCell(i) = 1 + icoord(1) + M*icoord(2) + MM*icoord(3)
         end do
@@ -296,7 +443,7 @@ contains
           Ri = Rs(:,i)
           do m = k + 1, ntotal
             j = atom(m)
-            if (me%body(j) /= ibody) then ! Do not include pairs of atoms in the same body
+            if (me%body(j) /= ibody) then
               Rij = Ri - Rs(:,j)
               Rij = Rij - anint(Rij)
               r2 = sum(Rij*Rij)
@@ -314,50 +461,6 @@ contains
     end associate
 
   end subroutine find_pairs
-
-!===================================================================================================
-
-  subroutine neighbor_handle( list, Lbox, positions ) bind(C,name="neighbor_handle")
-    type(nbList), intent(inout) :: list
-    real(rb),     value         :: Lbox
-    type(c_ptr),  value         :: positions
-
-    integer  :: M
-    real(rb) :: invL, time
-    logical  :: buildList
-    real(rb), pointer     :: R(:,:)
-    real(rb), allocatable :: Rs(:,:)
-    type(tData),  pointer :: me
-
-    call c_f_pointer( list%data, me )
-    list%time = list%time - omp_get_wtime()
-
-    call c_f_pointer( positions, R, [3,me%natoms])
-
-    buildList = maximum_approach_sq( me%natoms, R - me%R0 ) > me%skinSq
-    if (buildList) then
-      M = floor(ndiv*Lbox/me%xRc)
-      allocate( Rs(3,me%natoms) )
-      invL = one/Lbox
-      Rs = invL*R
-      call distribute_atoms( me, max(M,2*ndiv+1), Rs )
-
-      !$omp parallel num_threads(me%nthreads)
-      block
-        integer :: thread
-        thread = omp_get_thread_num() + 1
-        call find_pairs_and_compute( me, thread, InvL, Rs )
-      end block
-      !$omp end parallel
-
-      me%R0 = R
-      list%builds = list%builds + 1
-    endif
-
-    time = omp_get_wtime()
-    list%time = list%time + time
-
-  end subroutine neighbor_handle
 
 !===================================================================================================
 
