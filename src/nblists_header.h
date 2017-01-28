@@ -7,8 +7,13 @@ typedef struct {
   int    builds;         // Number of neighbor-list builds
   double time;           // Time taken in neighbor list handling
   void*  Data;           // Pointer to system data
+  struct {
+    _Bool thirdLaw;
+    _Bool jointXYZ;
+  } Options;
 } nbList;
 
-nbList neighbor_list( int threads, double rc, double skin, int N, int* body, int MC );
-void neighbor_handle( nbList* list, double Lbox, double* positions );
+nbList neighbor_list( int threads, double rc, double skin, int N, int* body );
+_Bool  neighbor_list_outdated( nbList* list, double* positions );
+void   neighbor_list_build( nbList* list, double Lbox, double* positions );
 

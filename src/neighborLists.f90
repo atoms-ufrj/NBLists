@@ -45,15 +45,18 @@ type, private :: tData
   type(tList) :: cellAtom                 ! List of atoms belonging to each cell
   type(tList) :: threadCell               ! List of cells to be dealt with in each parallel thread
 
-  integer, allocatable :: atomCell(:)     ! Array containing the current cell of each atom
-  integer, allocatable :: body(:)         ! Array containing the body index of each atom
-
-  real(rb), allocatable :: R0(:,:)        ! Position of each atom at latest neighbor list building
-
-  type(tCell), allocatable :: cell(:)      ! Array containing all neighbor cells of each cell
-  type(tList), allocatable :: neighbor(:)  ! Pointer to neighbor lists
+  integer,     allocatable :: atomCell(:) ! Array containing the current cell of each atom
+  integer,     allocatable :: body(:)     ! Array containing the body index of each atom
+  real(rb),    allocatable :: R0(:,:)     ! Position of each atom at latest neighbor list building
+  type(tCell), allocatable :: cell(:)     ! Array containing all neighbor cells of each cell
+  type(tList), allocatable :: neighbor(:) ! Pointer to neighbor lists
 
 end type tData
+
+type, bind(C) :: tOpts
+  logical(lb) :: thirdLaw
+  logical(lb) :: jointXYZ
+end type tOpts
 
 type, bind(C) :: nbList
   type(c_ptr) :: first                     ! Location of the first neighbor of each atom
@@ -64,6 +67,7 @@ type, bind(C) :: nbList
   integer(ib) :: builds                    ! Number of neighbor list builds
   real(rb)    :: time                      ! Time taken in neighbor list handling
   type(c_ptr) :: Data                      ! Pointer to system data
+  type(tOpts) :: Options                   ! List of options
 end type nbList
 
 contains
@@ -72,11 +76,10 @@ contains
 !                                L I B R A R Y   P R O C E D U R E S
 !===================================================================================================
 
-  function neighbor_list( threads, rc, skin, N, body, MC ) bind(C,name="neighbor_list")
+  function neighbor_list( threads, rc, skin, N, body ) bind(C,name="neighbor_list")
     integer(ib), value :: threads, N
     real(rb),    value :: rc, skin
     type(c_ptr), value :: body
-    integer(ib), value :: MC
     type(nbList)       :: neighbor_list
 
     integer :: i
@@ -93,8 +96,10 @@ contains
     neighbor_list % item = c_null_ptr
     neighbor_list % nitems = 0
 
+    neighbor_list % options % thirdLaw = .true.
+    neighbor_list % options % jointXYZ = .true.
+
     ! Set up fixed entities:
-    me%MonteCarlo = MC /= 0
     me%nthreads = threads
     me%Rc = rc
     me%RcSq = rc*rc
@@ -127,91 +132,100 @@ contains
 
 !===================================================================================================
 
-  subroutine neighbor_handle( list, Lbox, positions ) bind(C,name="neighbor_handle")
+  function neighbor_list_outdated( list, positions ) result( outdated ) &
+    bind(C,name="neighbor_list_deprecated")
+    type(nbList), intent(inout) :: list
+    type(c_ptr),  value         :: positions
+    logical(lb)                 :: outdated
+
+    type(tData), pointer :: me
+    real(rb),    pointer :: R(:,:)
+
+    call c_f_pointer( list%data, me )
+    call c_f_pointer( positions, R, [3,me%natoms] )
+    if (list % options % jointXYZ) then
+      outdated = maximum_approach_sq( me%natoms, R - me%R0 ) > me%skinSq
+    else
+      outdated = maximum_approach_sq( me%natoms, transpose(R) - me%R0 ) > me%skinSq
+    end if
+
+  end function neighbor_list_outdated
+
+!===================================================================================================
+
+  subroutine neighbor_list_build( list, Lbox, positions ) &
+    bind(C,name="neighbor_list_build")
     type(nbList), intent(inout) :: list
     real(rb),     value         :: Lbox
     type(c_ptr),  value         :: positions
 
     integer  :: M, i, n
     real(rb) :: invL, time
-    logical  :: buildList
     integer, allocatable  :: neighbors(:,:)
     integer,  pointer     :: first(:), last(:), item(:)
     real(rb), pointer     :: R(:,:)
     real(rb), allocatable :: Rs(:,:)
     type(tData),  pointer :: me
 
-    call c_f_pointer( list%data, me )
     list%time = list%time - omp_get_wtime()
 
-    call c_f_pointer( positions, R, [3,me%natoms])
+    call c_f_pointer( list%data, me )
+    call c_f_pointer( positions, R, [3,me%natoms] )
+    call c_f_pointer( list%first, first, [me%natoms] )
+    call c_f_pointer( list%last, last, [me%natoms] )
+    call c_f_pointer( list%item, item, [list%nmax] )
+    allocate( Rs(3,me%natoms), neighbors(me%natoms,me%nthreads) )
+    me%MonteCarlo = .not.list%options%thirdLaw
 
-    buildList = maximum_approach_sq( me%natoms, R - me%R0 ) > me%skinSq
-    if (buildList) then
-      M = floor(ndiv*Lbox/me%xRc)
-      allocate( Rs(3,me%natoms) )
-      invL = one/Lbox
-      Rs = invL*R
-      call distribute_atoms( me, max(M,2*ndiv+1), Rs )
+    list%builds = list%builds + 1
+    if (list%options%jointXYZ) then
+      me%R0 = R
+    else
+      me%R0 = transpose(R)
+    end if
 
-      allocate( neighbors(me%natoms,me%nthreads) )
+    M = floor(ndiv*Lbox/me%xRc)
+    invL = one/Lbox
+    Rs = invL*R
+    call distribute_atoms( me, max(M,2*ndiv+1), Rs )
 
-      !$omp parallel num_threads(me%nthreads)
-      block
-        integer :: thread
-        thread = omp_get_thread_num() + 1
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread
+      thread = omp_get_thread_num() + 1
+      call find_pairs( me, thread, InvL, Rs )
+      call count_neighbors( me, thread, neighbors(:,thread) )
+    end block
+    !$omp end parallel
 
-        ! Search for all atom pairs within the extended cutoff distance:
-        call find_pairs( me, thread, InvL, Rs )
+    n = 0
+    do i = 1, me%natoms
+      first(i) = n + 1
+      n = n + sum(neighbors(i,:))
+      last(i) = n
+    end do
 
-        ! Update reference positions and count neighbors of each atom:
-        call update_reference_and_count_neighbors( me, thread, R, neighbors(:,thread) )
+    if (list%nmax < n) then
+      deallocate( item )
+      allocate( item(n) )
+      list%nmax = n
+      list%item = c_loc(item)
+    end if
 
-      end block
-      !$omp end parallel
-
-      call c_f_pointer( list%first, first, [me%natoms] )
-      call c_f_pointer( list%last, last, [me%natoms] )
-      call c_f_pointer( list%item, item, [list%nmax] )
-
-      ! Sum up neighbors counted in different threads:
-      n = 0
-      do i = 1, me%natoms
-        first(i) = n + 1
-        n = n + sum(neighbors(i,:))
-        last(i) = n
-      end do
-
-      ! Reallocate list%item if necessary:
-      if (list%nmax < n) then
-        list%nmax = n
-        deallocate( item )
-        allocate( item(n) )
-        list%item = c_loc(item)
-      end if
-
-      ! Update neighbor list:
-      call update_neighbor_list( me, first, last, item )
-
-      list%builds = list%builds + 1
-    endif
+    call deploy_neighbor_list( me, first, item )
 
     time = omp_get_wtime()
     list%time = list%time + time
 
-    contains
-
-
-  end subroutine neighbor_handle
+  end subroutine neighbor_list_build
 
 !===================================================================================================
 !                              A U X I L I A R Y   P R O C E D U R E S
 !===================================================================================================
 
-  pure subroutine update_reference_and_count_neighbors( me, thread, R, ncount )
+  pure subroutine count_neighbors( me, thread, ncount )
     type(tData), intent(inout) :: me
     integer,     intent(in)    :: thread
-    real(rb),    intent(in)    :: R(3,me%natoms)
     integer,     intent(out)   :: ncount(me%natoms)
 
     integer :: firstAtom, lastAtom, m, i, j, k
@@ -222,7 +236,6 @@ contains
     associate (neighbor => me%neighbor(thread) )
       do m = firstAtom, lastAtom
         i = me%cellAtom%item(m)
-        me%R0(:,i) = R(:,i)
         ncount(i) = ncount(i) + neighbor%last(i) - neighbor%first(i) + 1
         if (me%MonteCarlo) then
           do k = neighbor%first(i), neighbor%last(i)
@@ -233,14 +246,18 @@ contains
       end do
     end associate
 
-  end subroutine update_reference_and_count_neighbors
+  end subroutine count_neighbors
 
 !===================================================================================================
 
-  subroutine update_neighbor_list( me, first, last, item )
+  subroutine deploy_neighbor_list( me, first, item )
     type(tData), intent(inout) :: me
-    integer,     intent(in)    :: first(me%natoms), last(me%natoms)
+    integer,     intent(in)    :: first(me%natoms)
     integer,     intent(out)   :: item(:)
+
+    integer :: position(me%natoms)
+
+    position = first - 1
 
     !$omp parallel num_threads(me%nthreads)
     block
@@ -254,9 +271,15 @@ contains
           i = me%cellAtom%item(m)
           do k = neighbor%first(i), neighbor%last(i)
             j = neighbor%item(k)
-            ! TODO: Add atom j in the neighbor list of i:
+            !$omp atomic update
+            position(i) = position(i) + 1
+            !$omp end atomic
+            item(position(i)) = j
             if (me%MonteCarlo) then
-              ! TODO: Add atom i in the neighbor list of j:
+              !$omp atomic update
+              position(j) = position(j) + 1
+              !$omp end atomic
+              item(position(j)) = i
             end if
           end do
         end do
@@ -264,7 +287,7 @@ contains
     end block
     !$omp end parallel
 
-  end subroutine update_neighbor_list
+  end subroutine deploy_neighbor_list
 
 !===================================================================================================
 
