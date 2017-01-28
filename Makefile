@@ -76,7 +76,7 @@ uninstall:
 
 lib: $(LIBDIR)/libnblists.so
 
-include: $(INCDIR)/nblists.h
+include: $(INCDIR)/nblists.h $(INCDIR)/nblists.f90
 
 # Shared library and includes:
 
@@ -85,8 +85,12 @@ $(LIBDIR)/libnblists.so: $(OBJECTS)
 	$(FORT) $(F_OPTS) -shared -fPIC -o $@ $(OBJECTS) $(LIBS)
 
 $(INCDIR)/nblists.h: $(SRCDIR)/nblists_header.h
-	mkdir -p $(INCDIR) $(LIBDIR)
-	cp $< $(INCDIR)/nblists.h
+	mkdir -p $(INCDIR)
+	cp $< $@
+
+$(INCDIR)/nblists.f90: $(SRCDIR)/nblists_module.f90
+	mkdir -p $(INCDIR)
+	cp $< $@
 
 # Object files:
 

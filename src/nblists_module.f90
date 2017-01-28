@@ -1,57 +1,4 @@
-module neighborLists
-
-use global
-use lists
-use omp_lib
-
-implicit none
-
-integer, parameter, private :: extra = 2000
-
-integer, parameter, private :: ndiv = 2
-integer, parameter, private :: nbcells = 62
-integer, parameter, private :: nb(3,nbcells) = reshape( [ &
-   1, 0, 0,    2, 0, 0,   -2, 1, 0,   -1, 1, 0,    0, 1, 0,    1, 1, 0,    2, 1, 0,   -2, 2, 0,  &
-  -1, 2, 0,    0, 2, 0,    1, 2, 0,    2, 2, 0,   -2,-2, 1,   -1,-2, 1,    0,-2, 1,    1,-2, 1,  &
-   2,-2, 1,   -2,-1, 1,   -1,-1, 1,    0,-1, 1,    1,-1, 1,    2,-1, 1,   -2, 0, 1,   -1, 0, 1,  &
-   0, 0, 1,    1, 0, 1,    2, 0, 1,   -2, 1, 1,   -1, 1, 1,    0, 1, 1,    1, 1, 1,    2, 1, 1,  &
-  -2, 2, 1,   -1, 2, 1,    0, 2, 1,    1, 2, 1,    2, 2, 1,   -2,-2, 2,   -1,-2, 2,    0,-2, 2,  &
-   1,-2, 2,    2,-2, 2,   -2,-1, 2,   -1,-1, 2,    0,-1, 2,    1,-1, 2,    2,-1, 2,   -2, 0, 2,  &
-  -1, 0, 2,    0, 0, 2,    1, 0, 2,    2, 0, 2,   -2, 1, 2,   -1, 1, 2,    0, 1, 2,    1, 1, 2,  &
-   2, 1, 2,   -2, 2, 2,   -1, 2, 2,    0, 2, 2,    1, 2, 2,    2, 2, 2 ], shape(nb) )
-
-type, private :: tCell
-  integer :: neighbor(nbcells)
-end type tCell
-
-type, private :: tData
-
-  logical :: MonteCarlo                   ! True if Monte Carlo instead of Molecular Dynamics
-  integer :: natoms                       ! Number of atoms in the system
-  integer :: mcells = 0                   ! Number of cells at each dimension
-  integer :: ncells = 0                   ! Total number of cells
-  integer :: maxcells = 0                 ! Maximum number of cells
-  integer :: maxatoms = 0                 ! Maximum number of atoms in a cell
-  integer :: maxpairs = 0                 ! Maximum number of pairs formed by all atoms of a cell
-  integer :: nthreads                     ! Number of parallel openmp threads
-  integer :: threadAtoms                  ! Number of atoms per parallel thread
-
-  real(rb) :: Rc                          ! Cut-off distance
-  real(rb) :: RcSq                        ! Cut-off distance squared
-  real(rb) :: xRc                         ! Extended cutoff distance (including skin)
-  real(rb) :: xRcSq                       ! Extended cutoff distance squared
-  real(rb) :: skinSq                      ! Square of the neighbor list skin width
-
-  type(tList) :: cellAtom                 ! List of atoms belonging to each cell
-  type(tList) :: threadCell               ! List of cells to be dealt with in each parallel thread
-
-  integer,     allocatable :: atomCell(:) ! Array containing the current cell of each atom
-  integer,     allocatable :: body(:)     ! Array containing the body index of each atom
-  real(rb),    allocatable :: R0(:,:)     ! Position of each atom at latest neighbor list building
-  type(tCell), allocatable :: cell(:)     ! Array containing all neighbor cells of each cell
-  type(tList), allocatable :: neighbor(:) ! Pointer to neighbor lists
-
-end type tData
+module nblists
 
 type, bind(C) :: tOpts
   logical(lb) :: thirdLaw
@@ -70,72 +17,24 @@ type, bind(C) :: nbList
   type(tOpts) :: Options                   ! List of options
 end type nbList
 
-contains
-
-!===================================================================================================
-!                                L I B R A R Y   P R O C E D U R E S
-!===================================================================================================
+interface
 
   function neighbor_list( threads, rc, skin, N, body ) bind(C,name="neighbor_list")
+    import
     integer(ib), value :: threads, N
     real(rb),    value :: rc, skin
     type(c_ptr), value :: body
     type(nbList)       :: neighbor_list
-
-    integer :: i
-
-    type(tData), pointer :: me
-    integer,     pointer :: pbody(:), first(:), last(:)
-
-    ! Allocate data structure:
-    allocate( me )
-    allocate( first(N), last(N), source = 0 )
-    neighbor_list % data = c_loc(me)
-    neighbor_list % first = c_loc(first)
-    neighbor_list % last = c_loc(last)
-    neighbor_list % item = c_null_ptr
-    neighbor_list % nitems = 0
-
-    neighbor_list % options % thirdLaw = .true.
-    neighbor_list % options % jointXYZ = .true.
-
-    ! Set up fixed entities:
-    me%nthreads = threads
-    me%Rc = rc
-    me%RcSq = rc*rc
-    me%xRc = rc + skin
-    me%xRcSq = me%xRc**2
-    me%skinSq = skin*skin
-    me%natoms = N
-    me%threadAtoms = (N + threads - 1)/threads
-
-    ! Set up body:
-    if (c_associated(body)) then
-      call c_f_pointer( body, pbody, [N] )
-      allocate( me%body(N), source = pbody )
-    else
-      allocate( me%body(N), source = [(i,i=1,N)] )
-    end if
-
-    ! Initialize counters and other mutable entities:
-    allocate( me%R0(3,N), source = zero )
-    allocate( me%cell(0), me%atomCell(N) )
-
-    ! Allocate memory for list of atoms per cell:
-    call me % cellAtom % allocate( N, 0 )
-
-    ! Allocate memory for neighbor lists:
-    allocate( me%neighbor(threads) )
-    call me % neighbor % allocate( extra, N )
-
   end function neighbor_list
 
 !===================================================================================================
 
-  function neighbor_list_outdated( list, positions ) bind(C,name="neighbor_list_outdated")
+  function neighbor_list_outdated( list, positions ) result( outdated ) &
+    bind(C,name="neighbor_list_outdated")
+    import
     type(nbList), intent(inout) :: list
     type(c_ptr),  value         :: positions
-    logical(lb)                 :: neighbor_list_outdated
+    logical(lb)                 :: outdated
 
     type(tData), pointer :: me
     real(rb),    pointer :: R(:,:)
@@ -143,9 +42,9 @@ contains
     call c_f_pointer( list%data, me )
     call c_f_pointer( positions, R, [3,me%natoms] )
     if (list % options % jointXYZ) then
-      neighbor_list_outdated = maximum_approach_sq( me%natoms, R - me%R0 ) > me%skinSq
+      outdated = maximum_approach_sq( me%natoms, R - me%R0 ) > me%skinSq
     else
-      neighbor_list_outdated = maximum_approach_sq( me%natoms, transpose(R) - me%R0 ) > me%skinSq
+      outdated = maximum_approach_sq( me%natoms, transpose(R) - me%R0 ) > me%skinSq
     end if
 
   end function neighbor_list_outdated
@@ -486,5 +385,5 @@ contains
 
 !===================================================================================================
 
-end module neighborLists
+end module nblists
 
