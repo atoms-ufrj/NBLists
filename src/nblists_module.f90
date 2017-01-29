@@ -9,6 +9,7 @@ type, bind(C) :: nbList
   type(c_ptr) :: first                     ! Location of the first neighbor of each atom
   type(c_ptr) :: last                      ! Location of the last neighbor of each atom
   type(c_ptr) :: item                      ! Indices of neighbor atoms
+  type(c_ptr) :: R0                        ! Atom positions at latest neighbor list build
   integer(ib) :: nitems                    ! Number of atoms in neighbor list
   integer(ib) :: nmax                      ! Maximum number of atoms in neighbor list
   integer(ib) :: builds                    ! Number of neighbor list builds
