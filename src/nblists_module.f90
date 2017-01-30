@@ -30,9 +30,8 @@ interface
 
   subroutine neighbor_allocate_2d_array( list, array, jointXYZ ) bind(C,name="neighbor_allocate_2d_array")
     import
-    type(nbList), intent(inout) :: list
+    type(nbList), value         :: list
     type(c_ptr),  intent(inout) :: array
-    logical(lb),  value         :: jointXYZ
   end subroutine neighbor_allocate_2d_array
 
   function neighbor_list_outdated( list, coords ) bind(C,name="neighbor_list_outdated")

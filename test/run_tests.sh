@@ -1,6 +1,6 @@
 #!/bin/bash
 commands+=("./test_c_md data.inp")
-#commands+=("./test_c_md 4 data.inp")
+commands+=("./test_c_md 4 data.inp")
 #commands+=("")
 #commands+=("")
 #commands+=("")

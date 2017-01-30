@@ -23,21 +23,37 @@ Standard compilation
 >
 >      sudo apt-get install gfortran
 
-### Downloading the library:
+### Downloading the source code:
 
-* Clone the repository
+* Clone the repository:
 
         git clone https://github.com/atoms-ufrj/NBLists
 
   This will create a local copy of the repository on your device.
 
+### Updating the repository:
+
+* Execute the following command in the root directory of the repository tree:
+
+        git pull
+
+  This will synchronize the local copy with the online repository.
+
 ### Compiling the library:
 
-* Execute the Makefile in the root directory of the repository tree
+* Execute the Makefile in the root directory of the repository tree:
 
         make
 
   This will build the shared library (lib/libnblists.so).
+
+### Testing the compiled library:
+
+* Use building option **test**
+
+        make test
+
+  This will compile and run some testing codes in the `test` directory.
 
 ### Installing the library in the system path:
 
@@ -48,15 +64,15 @@ Standard compilation
   This will copy the static library (lib/libnblists.so) to `/usr/local/lib` and the C header file
 (include/nblists.h) and fortran module (include/nblists.f90) to `/usr/local/include`.
 
-## Uninstalling the library from the system path:
+### Uninstalling the library from the system path:
 
 * Use building option **uninstall**
 
         sudo make uninstall
 
 
-Using the C Binding
--------------------
+Using the Library
+-----------------
 
 ```c++
     #include <nblists.h>
@@ -65,71 +81,42 @@ Using the C Binding
     double rc;   // Cutoff distance for pair interactions
     double skin; // Extra distance for the Verlet-type neighbor list
     int N;       // Number of atoms
-    double **R;  // Array of atom coordinates
+    double **R;  // Pointers to a contiguously stored array of atomic coordinates
     double L;    // Side length of a cubic box with periodic boundary condition
+    int *group;  // Either NULL or a pointer to an array of group indices
     ...
 
-    // If groups are defined so that same-group atom pairs are ignored:
-    int *group = new int[N]; // group[i] is the one that contains atom i
+    // Initializing the list:
+    nbList list = neighbor_list( threads, rc, skin, N, group );
+    /* If group = NULL, all possible atom pairs will be condidered.
+       Otherwise, if each atom i belongs to a group whose index is stored in group[i],
+       same-group atom pairs will ignored during the neighbor list building. */
+
+    // Determining how coordinates are stored in memory:
+    list.options.jointXYZ = 1; // Default
+    /* Coordinates are stored as [x1,y1,z1, ..., xN,yN,zN]. If they are stored
+       as [x1,...,xN, y1,...,yN, z1,...,zN] instead, then make jointXYZ = 0. */
+
+    // Determining whether Newton's Third Law is taken into account:
+    list.options.thirdLaw = 1; // Default
+    /* Whenever distance(i,j) < Rc + Rs, either j will be listed as a neighbor of i
+       or vice-versa. If both pairs must be listed, then make thirdLaw = 0. */
+
+    // Determining which base is used for array indexing:
+    list.options.zeroBase = 1; // Default
+    /* A C-style array indexing (0-based) is employed. If a Fortran-style
+       indexing (1-based) is to be used, then make zeroBase = 0. */
+
+    // Using the library to allocate a contiguous array of coordinates (optional):
+    neighbor_allocate_2d_array( list, &R );
     ...
-    nbList list1 = neighbor_list( threads, rc, skin, N, group );
-
-    // Otherwise, in order to consider all possible atom pairs:
-    nbList list2 = neighbor_list( threads, rc, skin, N, NULL );
-
-    // If either pair i-j or j-i must appear in the neighbor list:
-    list1.Options.thirdLaw = True; // Default
-
-    // If both pairs i-j and j-i must appear in the neighbor list
-    list2.Options.thirdLaw = False;
-
-    // If coordinates are stored as R = [x1,y1,z1, x2,y2,z2, ..., xN,yN,zN]:
-    list1.Options.jointXYZ = True; // Default
-
-    // If coordinates are stored as R = [x1,x2,...,xN, y1,y2,...,yN, z1,z2,...,zN]:
-    list2.Options.jointXYZ = False;
-
-    // If C-style array indexing (zero-based) is employed:
-    list1.Options.zeroBase = True; // Default
 
     // Basic neighbor list usage in Molecular Dynamics:
-    if (neighbor_list_outdated( list1, R, 0, NULL ))
-      neighbor_list_build( &list1, L, R );
+    if (neighbor_list_outdated( list, R[0] ))
+      neighbor_list_build( &list, L, R[0] );
     for (int i = 0; i < N; i++)
-      for (int k = list1.first[i]-1; k < list1.last[i]; k++) {
-        int j = list1.item[k] - 1;
-        // Compute interaction of pair i-j
-        ...
-      }
-
-    // Basic neighbor list usage in Monte Carlo:
-    int M;          // Number of atoms being moved
-    int *moved;     // Index of each atom being moved
-    double **Rnew;  // New coordinates of the M atoms
-
-    for (int i = 0; i < N; i++)
-      for (int k = list1.first[i]-1; k < list1.last[i]; k++) {
-        int j = list1.item[k] - 1;
-        // Compute interaction of pair i-j
-        ...
-      }
-    
-
-    if (atom_i_move_accepted) {
-      double d[3];
-      for (int k=0; k < 3; k++) d[k] = R[i][k] - list2.R0[i][k];
-      if (d[0]*d[0] + d[1]*d[1] + d[2]*d[2] < list2.maxSD)
-        
-    }
-
-    if ()
-
-    if neighbor_list_outdated( list1, R )
-      neighbor_list_build( &list1, L, R );
-
-    for (int i = 0; i < N; i++)
-      for (int k = list1.first[i]-1; k < list1.last[i]; k++) {
-        int j = list1.item[k] - 1;
+      for (int k = list.start[i]; k < list.end[i]; k++) {
+        int j = list.item[k];
         // Compute interaction of pair i-j
         ...
       }

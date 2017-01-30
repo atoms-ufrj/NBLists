@@ -139,10 +139,9 @@ contains
 
 !===================================================================================================
 
-  subroutine neighbor_allocate_2d_array( list, array, jointXYZ ) bind(C,name="neighbor_allocate_2d_array")
-    type(nbList), intent(inout) :: list
+  subroutine neighbor_allocate_2d_array( list, array ) bind(C,name="neighbor_allocate_2d_array")
+    type(nbList), value         :: list
     type(c_ptr),  intent(inout) :: array
-    logical(lb),  value         :: jointXYZ
 
     integer :: i
     type(tData), pointer :: me
@@ -150,8 +149,7 @@ contains
     type(c_ptr), pointer :: ptr(:)
 
     call c_f_pointer( list%data, me )
-    list % options % jointXYZ = jointXYZ
-    if (jointXYZ) then
+    if (list % options % jointXYZ) then
       allocate( R(3,me%natoms), ptr(me%natoms) )
       forall (i=1:me%natoms) ptr(i) = c_loc(R(1,i))
     else
@@ -337,6 +335,7 @@ contains
             end do
           end do
         end associate
+        !$omp barrier
 
         if (me%zeroBasedIndexing) then
           first = (thread - 1)*me%threadAtoms + 1
@@ -572,4 +571,3 @@ contains
 !===================================================================================================
 
 end module neighborLists
-

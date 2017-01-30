@@ -218,9 +218,9 @@ int main( int argc, char *argv[] )  {
   simpar par;
   read_data( &par, filename );
   nbList list = neighbor_list( threads, par.Rc, par.Rs, par.N, NULL );
-  neighbor_allocate_2d_array( &list, &par.R, TRUE );
-  neighbor_allocate_2d_array( &list, &par.V, TRUE );
-  neighbor_allocate_2d_array( &list, &par.F, TRUE );
+  neighbor_allocate_2d_array( list, &par.R );
+  neighbor_allocate_2d_array( list, &par.V );
+  neighbor_allocate_2d_array( list, &par.F );
   create_configuration( &par );
 
   compute_pairs( &par, &list );
