@@ -35,12 +35,10 @@ interface
     logical(lb),  value         :: jointXYZ
   end subroutine neighbor_allocate_array
 
-  function neighbor_list_outdated( list, coords, N, atoms ) bind(C,name="neighbor_list_outdated")
+  function neighbor_list_outdated( list, coords ) bind(C,name="neighbor_list_outdated")
     import
     type(nbList), intent(inout) :: list
     type(c_ptr),  value         :: coords
-    integer(ib),  value         :: N
-    integer(ib),  intent(in)    :: atoms(*)
     logical(lb)                 :: neighbor_list_outdated
   end function neighbor_list_outdated
 

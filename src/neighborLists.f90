@@ -164,32 +164,21 @@ contains
 
 !===================================================================================================
 
-  function neighbor_list_outdated( list, coords, N, atoms ) bind(C,name="neighbor_list_outdated")
+  function neighbor_list_outdated( list, coords ) bind(C,name="neighbor_list_outdated")
     type(nbList), intent(inout) :: list
     type(c_ptr),  value         :: coords
-    integer(ib),  value         :: N
-    integer(ib),  intent(in)    :: atoms(*)
     logical(lb)                 :: neighbor_list_outdated
-
-    integer :: index(N)
 
     real(rb),    pointer :: R(:,:)
     type(tData), pointer :: me
 
     call c_f_pointer( list%data, me )
-
     if (list % options % jointXYZ) then
       call c_f_pointer( coords, R, [3,me%natoms] )
+      neighbor_list_outdated = maximum_approach_sq( me%natoms, R - me%R0 ) > me%skinSq
     else
       call c_f_pointer( coords, R, [me%natoms,3] )
-    end if
-
-    if (N == me%natoms) then
-      neighbor_list_outdated = maximum_approach_sq( N, R - me%R0 ) > me%skinSq
-    else
-      index = atoms(1:N)
-      if (list % options % zeroBase) index = index + 1
-      neighbor_list_outdated = maximum_approach_sq( N, R(:,index) - me%R0(:,index) ) > me%skinSq
+      neighbor_list_outdated = maximum_approach_sq( me%natoms, transpose(R) - me%R0 ) > me%skinSq
     end if
 
   end function neighbor_list_outdated
@@ -382,6 +371,29 @@ contains
     maximum_approach_sq = maximum + 2*sqrt(maximum*next) + next
 
   end function maximum_approach_sq
+
+!===================================================================================================
+
+  pure subroutine insertion_sort( val, ind )
+    real(rb), intent(inout) :: val(:)
+    integer,  intent(inout) :: ind(:)
+
+    integer :: i, j, itemp
+    real(rb) :: rtemp
+ 
+    do i = 2, size(val)
+      j = i - 1
+      rtemp = val(i)
+      itemp = ind(i)
+      do while ( (j >= 1).and.(val(j) > rtemp) )
+        val(j+1) = val(j)
+        ind(j+1) = ind(j)
+        j = j - 1
+      end do
+      val(j+1) = rtemp
+      ind(j+1) = itemp
+    end do
+  end subroutine insertion_sort
 
 !===================================================================================================
 

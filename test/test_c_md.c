@@ -212,7 +212,7 @@ int main( int argc, char *argv[] )  {
   compute_all_pairs( &par );
   printf("Energy, Virial = %f %f\n",par.Energy,par.Virial);
 
-  if (neighbor_list_outdated( &list, par.R, par.N, NULL ))
+  if (neighbor_list_outdated( &list, par.R ))
     neighbor_list_build( &list, par.L, par.R );
   printf("Energy, Virial = %f %f\n",par.Energy,par.Virial);
 
