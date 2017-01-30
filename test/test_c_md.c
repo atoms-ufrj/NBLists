@@ -5,8 +5,8 @@
 #include <time.h>
 
 typedef struct {
-  int N, Nx3, seed, Npassos, Nprop;
-  double rho, L, Rc, Rs, Rc2, Temp, Press, Dt, InvL, Ws, SixWs, Ec, Dt_2, Energy, Virial;
+  int N, Nx3, seed, Nsteps, Nprop;
+  double rho, L, Rc, Rs, Rc2, Temp, Press, Dt, InvL, Ws, SixWs, Ec, Dt_2, Potential, Virial;
   double **R, **V, **F;
 } simpar;
 
@@ -48,7 +48,7 @@ void read_data( simpar *par, char *filename )
     readline; sscanf( line, "%lf", &par->Rs );
     readline; sscanf( line, "%d",  &par->seed );
     readline; sscanf( line, "%lf", &par->Dt );
-    readline; sscanf( line, "%d",  &par->Npassos );
+    readline; sscanf( line, "%d",  &par->Nsteps );
     readline; sscanf( line, "%d",  &par->Nprop );
     readline; sscanf( line, "%lf", &par->rho );
     readline; sscanf( line, "%lf", &par->Temp );
@@ -101,10 +101,13 @@ void create_configuration( simpar *par )
 
 //--------------------------------------------------------------------------------------------------
 
-void compute( simpar *par, nbList *list )
+void compute_pairs( simpar *par, nbList *list )
 {
   int i, j, k, m;
   double **R, **F, E, W, vec[3], r2, invR2, invR6, invR12, Eij, Wij, Fijk;
+
+  if (neighbor_list_outdated( list, par->R[0]))
+    neighbor_list_build( list, par->L, par->R[0] );
 
   E = 0.0;
   W = 0.0;
@@ -113,9 +116,9 @@ void compute( simpar *par, nbList *list )
   for (i = 0; i < par->N; i++)
     F[i][0] = F[i][1] = F[i][2] = 0.0;
 
-  for (i = 0; i < par->N-1; i++) {
+  for (i = 0; i < par->N; i++) {
     for (m = list->start[i]; m <= list->end[i]; m++) {
-      j = list->item[k];
+      j = list->item[m];
       for (k = 0; k < 3; k++) {
         vec[k] = R[i][k] - R[j][k];
         vec[k] = vec[k] - par->L*round(par->InvL*vec[k]);
@@ -129,7 +132,7 @@ void compute( simpar *par, nbList *list )
         E += Eij;
         Wij = invR12 + Eij;
         W += Wij;
-        Wij *= invR2;
+        Wij *= 24.0*invR2;
         for (k = 0; k < 3; k++) {
           Fijk = Wij*vec[k];
           F[i][k] += Fijk;
@@ -138,7 +141,7 @@ void compute( simpar *par, nbList *list )
       }
     }
   }
-  par->Energy = 4.0*E;
+  par->Potential = 4.0*E;
   par->Virial = 8.0*W;
 }
 
@@ -171,7 +174,7 @@ void compute_all_pairs( simpar *par )
         E += Eij;
         Wij = invR12 + Eij;
         W += Wij;
-        Wij *= invR2;
+        Wij *= 24.0*invR2;
         for (k = 0; k < 3; k++) {
           Fijk = Wij*vec[k];
           F[i][k] += Fijk;
@@ -180,8 +183,19 @@ void compute_all_pairs( simpar *par )
       }
     }
   }
-  par->Energy = 4.0*E;
+  par->Potential = 4.0*E;
   par->Virial = 8.0*W;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+double energy( simpar par )
+{
+  double K = 0.0;
+  double *V = par.V[0];
+  for (int i = 0; i < par.Nx3; i++)
+    K += V[i]*V[i];
+  return par.Potential + 0.5*K;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -204,17 +218,29 @@ int main( int argc, char *argv[] )  {
   simpar par;
   read_data( &par, filename );
   nbList list = neighbor_list( threads, par.Rc, par.Rs, par.N, NULL );
-  neighbor_allocate_array( &list, &par.R, TRUE );
-  neighbor_allocate_array( &list, &par.V, TRUE );
-  neighbor_allocate_array( &list, &par.F, TRUE );
+  neighbor_allocate_2d_array( &list, &par.R, TRUE );
+  neighbor_allocate_2d_array( &list, &par.V, TRUE );
+  neighbor_allocate_2d_array( &list, &par.F, TRUE );
   create_configuration( &par );
 
-  compute_all_pairs( &par );
-  printf("Energy, Virial = %f %f\n",par.Energy,par.Virial);
-
-  if (neighbor_list_outdated( &list, par.R ))
-    neighbor_list_build( &list, par.L, par.R );
-  printf("Energy, Virial = %f %f\n",par.Energy,par.Virial);
+  compute_pairs( &par, &list );
+  printf("Step Potential Virial Total\n");
+  printf("%d %lf %lf %lf\n", 0, par.Potential, par.Virial, energy( par ));
+  for (int step = 1; step <= par.Nsteps; step++) {
+    if (step % par.Nprop == 0) printf("%d %lf %lf %lf\n", step, par.Potential, par.Virial, energy( par ));
+      for (int i = 0; i < par.N; i++)
+        for (int j = 0; j < 3; j++) {
+          par.V[i][j] += par.F[i][j]*par.Dt_2;
+          par.R[i][j] += par.V[i][j]*par.Dt;
+        }
+/*      compute_all_pairs( &par );*/
+      compute_pairs( &par, &list );
+      for (int i = 0; i < par.N; i++)
+        for (int j = 0; j < 3; j++)
+          par.V[i][j] += par.F[i][j]*par.Dt_2;
+  }
+  printf("neighbor list builds = %d\n", list.builds);
+  printf("list building time = %f s.\n", list.time);
 
   return EXIT_SUCCESS;
 }

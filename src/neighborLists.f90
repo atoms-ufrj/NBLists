@@ -139,7 +139,7 @@ contains
 
 !===================================================================================================
 
-  subroutine neighbor_allocate_array( list, array, jointXYZ ) bind(C,name="neighbor_allocate_array")
+  subroutine neighbor_allocate_2d_array( list, array, jointXYZ ) bind(C,name="neighbor_allocate_2d_array")
     type(nbList), intent(inout) :: list
     type(c_ptr),  intent(inout) :: array
     logical(lb),  value         :: jointXYZ
@@ -160,7 +160,7 @@ contains
     end if
     array = c_loc(ptr(1))
 
-  end subroutine neighbor_allocate_array
+  end subroutine neighbor_allocate_2d_array
 
 !===================================================================================================
 
@@ -188,7 +188,7 @@ contains
   subroutine neighbor_list_build( list, L, coords ) bind(C,name="neighbor_list_build")
     type(nbList), intent(inout) :: list
     real(rb),     value         :: L
-    type(c_ptr),  intent(in)    :: coords
+    type(c_ptr),  value         :: coords
 
     integer  :: M, i, n
     real(rb) :: invL, time
