@@ -28,10 +28,17 @@ interface
     type(nbList)       :: neighbor_list
   end function neighbor_list
 
+  subroutine neighbor_allocate_array( list, array, jointXYZ ) bind(C,name="neighbor_allocate_array")
+    import
+    type(nbList), intent(inout) :: list
+    type(c_ptr),  intent(inout) :: array
+    logical(lb),  value         :: jointXYZ
+  end subroutine neighbor_allocate_array
+
   function neighbor_list_outdated( list, coords, N, atoms ) bind(C,name="neighbor_list_outdated")
     import
     type(nbList), intent(inout) :: list
-    real(rb),     intent(in)    :: coords(*)
+    type(c_ptr),  value         :: coords
     integer(ib),  value         :: N
     integer(ib),  intent(in)    :: atoms(*)
     logical(lb)                 :: neighbor_list_outdated
@@ -40,9 +47,8 @@ interface
   subroutine neighbor_list_build( list, Lbox, positions ) bind(C,name="neighbor_list_build")
     import
     type(nbList), intent(inout) :: list
-    real(rb),     value         :: Lbox
-    type(c_ptr),  value         :: positions
-
+    real(rb),     value         :: L
+    type(c_ptr),  intent(in)    :: coords
   end subroutine neighbor_list_build
 
 end interface

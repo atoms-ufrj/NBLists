@@ -139,46 +139,67 @@ contains
 
 !===================================================================================================
 
+  subroutine neighbor_allocate_array( list, array, jointXYZ ) bind(C,name="neighbor_allocate_array")
+    type(nbList), intent(inout) :: list
+    type(c_ptr),  intent(inout) :: array
+    logical(lb),  value         :: jointXYZ
+
+    integer :: i
+    type(tData), pointer :: me
+    real(rb),    pointer :: R(:,:)
+    type(c_ptr), pointer :: ptr(:)
+
+    call c_f_pointer( list%data, me )
+    list % options % jointXYZ = jointXYZ
+    if (jointXYZ) then
+      allocate( R(3,me%natoms), ptr(me%natoms) )
+      forall (i=1:me%natoms) ptr(i) = c_loc(R(1,i))
+    else
+      allocate( R(me%natoms,3), ptr(3) )
+      forall (i=1:me%natoms) ptr(i) = c_loc(R(i,1))
+    end if
+    array = c_loc(ptr(1))
+
+  end subroutine neighbor_allocate_array
+
+!===================================================================================================
+
   function neighbor_list_outdated( list, coords, N, atoms ) bind(C,name="neighbor_list_outdated")
     type(nbList), intent(inout) :: list
-    real(rb),     intent(in)    :: coords(*)
+    type(c_ptr),  value         :: coords
     integer(ib),  value         :: N
     integer(ib),  intent(in)    :: atoms(*)
     logical(lb)                 :: neighbor_list_outdated
 
-    integer  :: j, index(N)
-    real(rb) :: R(3,N)
+    integer :: index(N)
+
+    real(rb),    pointer :: R(:,:)
     type(tData), pointer :: me
 
     call c_f_pointer( list%data, me )
 
+    if (list % options % jointXYZ) then
+      call c_f_pointer( coords, R, [3,me%natoms] )
+    else
+      call c_f_pointer( coords, R, [me%natoms,3] )
+    end if
+
     if (N == me%natoms) then
-      if (list % options % jointXYZ) then
-        R = reshape(coords(1:3*N), [3,N])
-      else
-        R = transpose(reshape(coords(1:3*N), [N,3]))
-      end if
       neighbor_list_outdated = maximum_approach_sq( N, R - me%R0 ) > me%skinSq
     else
       index = atoms(1:N)
       if (list % options % zeroBase) index = index + 1
-      if (list % options % jointXYZ) then
-        forall (j=1:N) R(:,j) = coords(3*(index(j)-1)+1:3*index(j))
-      else
-        forall (j=1:3) R(j,:) = coords(me%natoms*(j-1)+index)
-      end if
-      neighbor_list_outdated = maximum_approach_sq( N, R - me%R0(:,index) ) > me%skinSq
+      neighbor_list_outdated = maximum_approach_sq( N, R(:,index) - me%R0(:,index) ) > me%skinSq
     end if
 
   end function neighbor_list_outdated
 
 !===================================================================================================
 
-  subroutine neighbor_list_build( list, Lbox, positions ) &
-    bind(C,name="neighbor_list_build")
+  subroutine neighbor_list_build( list, L, coords ) bind(C,name="neighbor_list_build")
     type(nbList), intent(inout) :: list
-    real(rb),     value         :: Lbox
-    type(c_ptr),  value         :: positions
+    real(rb),     value         :: L
+    type(c_ptr),  intent(in)    :: coords
 
     integer  :: M, i, n
     real(rb) :: invL, time
@@ -196,13 +217,14 @@ contains
     allocate( Rs(3,me%natoms), neighbors(me%natoms,me%nthreads) )
 
     if (list % options % jointXYZ) then
-      call c_f_pointer( positions, R, [3,me%natoms] )
+      call c_f_pointer( coords, R, [3,me%natoms] )
       me%R0 = R
     else
-      call c_f_pointer( positions, R, [me%natoms,3] )
-      me%R0 = transpose( R )
+      call c_f_pointer( coords, R, [me%natoms,3] )
+      me%R0 = transpose(R)
     end if
-    invL = one/Lbox
+
+    invL = one/L
     Rs = invL*me%R0
 
     me%MonteCarlo = .not.list%options%thirdLaw
@@ -210,7 +232,7 @@ contains
 
     list%builds = list%builds + 1
 
-    M = floor(ndiv*Lbox/me%xRc)
+    M = floor(ndiv*L/me%xRc)
     call distribute_atoms( me, max(M,2*ndiv+1), Rs )
 
     !$omp parallel num_threads(me%nthreads)
@@ -294,44 +316,48 @@ contains
     position = start - 1
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, first, last, m, i, j, k, n, ipos
-      thread = omp_get_thread_num() + 1
-
-      first = me%cellAtom%first(me%threadCell%first(thread))
-      last = me%cellAtom%last(me%threadCell%last(thread))
-      associate (neighbor => me%neighbor(thread) )
-        do m = first, last
-          i = me%cellAtom%item(m)
-          n = neighbor%last(i) - neighbor%first(i) + 1
-          !$omp atomic capture
-          ipos = position(i)
-          position(i) = position(i) + n
-          !$omp end atomic
-          do k = neighbor%first(i), neighbor%last(i)
-            j = neighbor%item(k)
-            ipos = ipos + 1
-            item(ipos) = j
-            if (me%MonteCarlo) then
-              !$omp atomic update
-              position(j) = position(j) + 1
-              !$omp end atomic
-              item(position(j)) = i
-            end if
-          end do
-        end do
-      end associate
-
-      if (me%zeroBasedIndexing) then
-        first = (thread - 1)*me%threadAtoms + 1
-        last = min(thread*me%threadAtoms, me%natoms)
-        forall (i=start(first):end(last)) item(i) = item(i) - 1
-        start(first:last) = start(first:last) - 1
-        end(first:last) = end(first:last) - 1
-      end if
-
-    end block
+    call build_partial_list
     !$omp end parallel
+
+    contains
+
+      subroutine build_partial_list
+        integer :: thread, first, last, m, i, j, k, n, ipos
+        thread = omp_get_thread_num() + 1
+
+        first = me%cellAtom%first(me%threadCell%first(thread))
+        last = me%cellAtom%last(me%threadCell%last(thread))
+        associate (neighbor => me%neighbor(thread) )
+          do m = first, last
+            i = me%cellAtom%item(m)
+            n = neighbor%last(i) - neighbor%first(i) + 1
+            !$omp atomic capture
+            ipos = position(i)
+            position(i) = position(i) + n
+            !$omp end atomic
+            do k = neighbor%first(i), neighbor%last(i)
+              j = neighbor%item(k)
+              ipos = ipos + 1
+              item(ipos) = j
+              if (me%MonteCarlo) then
+                !$omp atomic update
+                position(j) = position(j) + 1
+                !$omp end atomic
+                item(position(j)) = i
+              end if
+            end do
+          end do
+        end associate
+
+        if (me%zeroBasedIndexing) then
+          first = (thread - 1)*me%threadAtoms + 1
+          last = min(thread*me%threadAtoms, me%natoms)
+          forall (i=start(first):end(last)) item(i) = item(i) - 1
+          start(first:last) = start(first:last) - 1
+          end(first:last) = end(first:last) - 1
+        end if
+
+      end subroutine build_partial_list
 
   end subroutine deploy_neighbor_list
 

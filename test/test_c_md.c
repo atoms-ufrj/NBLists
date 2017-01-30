@@ -7,10 +7,12 @@
 typedef struct {
   int N, Nx3, seed, Npassos, Nprop;
   double rho, L, Rc, Rs, Rc2, Temp, Press, Dt, InvL, Ws, SixWs, Ec, Dt_2, Energy, Virial;
-  double *R, *V, *F;
+  double **R, **V, **F;
 } simpar;
 
 #define M_PI 3.14159265358979323846
+#define TRUE 1
+#define FALSE 0
 
 //--------------------------------------------------------------------------------------------------
 
@@ -64,9 +66,6 @@ void read_data( simpar *par, char *filename )
   par->Ec = InvRc12 - InvRc6;
   par->Dt_2 = 0.5*par->Dt;
   par->Nx3 = 3*par->N;
-  par->R = malloc( par->Nx3*sizeof(double) );
-  par->V = malloc( par->Nx3*sizeof(double) );
-  par->F = malloc( par->Nx3*sizeof(double) );
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -81,10 +80,9 @@ void create_configuration( simpar *par )
     a[1] = (i - a[2]*Nd*Nd)/Nd;
     a[0] = i - a[1]*Nd - a[2]*Nd*Nd;
     for (int j = 0; j < 3; j++) {
-      int k = 3*i + j;
-      par->R[k] = (par->L/Nd)*a[j] + 0.5;
-      par->V[k] = random_normal();
-      Vcm[j] += par->V[k];
+      par->R[i][j] = (par->L/Nd)*a[j] + 0.5;
+      par->V[i][j] = random_normal();
+      Vcm[j] += par->V[i][j];
     }
   }
   for (int j = 0; j < 3; j++)
@@ -92,58 +90,51 @@ void create_configuration( simpar *par )
   double factor = 0.0;
   for (int i = 0; i < par->N; i++)
     for (int j = 0; j < 3; j++) {
-      int k = 3*i+j;
-      par->V[k] -= Vcm[j];
-      factor += par->V[k]*par->V[k];
+      par->V[i][j] -= Vcm[j];
+      factor += par->V[i][j]*par->V[i][j];
     }
   factor = sqrt(par->Temp*(3*par->N - 3)/factor);
-  for (int i = 0; i < 3*par->N; i++)
-    par->V[i] *= factor;
+  for (int i = 0; i < par->N; i++)
+    for (int j = 0; j < 3; j++)
+      par->V[i][j] *= factor;
 }
 
 //--------------------------------------------------------------------------------------------------
 
 void compute( simpar *par, nbList *list )
 {
-  double *R = par->R;
-  double *F = par->F;
+  int i, j, k, m;
+  double **R, **F, E, W, vec[3], r2, invR2, invR6, invR12, Eij, Wij, Fijk;
 
-  double E = 0.0;
-  double W = 0.0;
-  for (int i = 0; i < par->Nx3; i++)
-    F[i] = 0.0;
+  E = 0.0;
+  W = 0.0;
+  R = par->R;
+  F = par->F;
+  for (i = 0; i < par->N; i++)
+    F[i][0] = F[i][1] = F[i][2] = 0.0;
 
-  for (int i = 0; i < par->N; i++) {
-    int ix = 3*i;
-    int iy = ix + 1;
-    int iz = iy + 1;
-    for (int k = list->start[i]; k <= list->end[i]; k++) {
-      int j = list->item[k];
-      int jx = 3*j;
-      int jy = jx + 1;
-      int jz = jy + 1;
-      double rx = R[ix] - R[jx];
-      double ry = R[iy] - R[jy];
-      double rz = R[iz] - R[jz];
-      double r2 = rx*rx + ry*ry + rz*rz;
+  for (i = 0; i < par->N-1; i++) {
+    for (m = list->start[i]; m <= list->end[i]; m++) {
+      j = list->item[k];
+      for (k = 0; k < 3; k++) {
+        vec[k] = R[i][k] - R[j][k];
+        vec[k] = vec[k] - par->L*round(par->InvL*vec[k]);
+      }
+      r2 = vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2];
       if (r2 < par->Rc2) {
-        double invR2 = 1.0/r2;
-        double invR6 = invR2*invR2*invR2;
-        double invR12 = invR6*invR6;
-        double Eij = invR12 - invR6;
+        invR2 = 1.0/r2;
+        invR6 = invR2*invR2*invR2;
+        invR12 = invR6*invR6;
+        Eij = invR12 - invR6;
         E += Eij;
-        double Wij = invR12 + Eij;
+        Wij = invR12 + Eij;
         W += Wij;
         Wij *= invR2;
-        double Fijx = Wij*rx;
-        double Fijy = Wij*ry;
-        double Fijz = Wij*rz;
-        F[ix] += Fijx;
-        F[iy] += Fijy;
-        F[iz] += Fijz;
-        F[jx] -= Fijx;
-        F[jy] -= Fijy;
-        F[jz] -= Fijz;
+        for (k = 0; k < 3; k++) {
+          Fijk = Wij*vec[k];
+          F[i][k] += Fijk;
+          F[j][k] -= Fijk;
+        }
       }
     }
   }
@@ -153,46 +144,39 @@ void compute( simpar *par, nbList *list )
 
 //--------------------------------------------------------------------------------------------------
 
-void brute_force_compute( simpar *par )
+void compute_all_pairs( simpar *par )
 {
-  double *R = par->R;
-  double *F = par->F;
+  int i, j, k;
+  double **R, **F, E, W, vec[3], r2, invR2, invR6, invR12, Eij, Wij, Fijk;
 
-  double E = 0.0;
-  double W = 0.0;
-  for (int i = 0; i < par->Nx3; i++)
-    F[i] = 0.0;
+  E = 0.0;
+  W = 0.0;
+  R = par->R;
+  F = par->F;
+  for (i = 0; i < par->N; i++)
+    F[i][0] = F[i][1] = F[i][2] = 0.0;
 
-  for (int i = 0; i < par->N-1; i++) {
-    int ix = 3*i;
-    int iy = ix + 1;
-    int iz = iy + 1;
-    for (int j = i+1; j < par->N; j++) {
-      int jx = 3*j;
-      int jy = jx + 1;
-      int jz = jy + 1;
-      double rx = R[ix] - R[jx];
-      double ry = R[iy] - R[jy];
-      double rz = R[iz] - R[jz];
-      double r2 = rx*rx + ry*ry + rz*rz;
+  for (i = 0; i < par->N-1; i++) {
+    for (j = i+1; j < par->N; j++) {
+      for (k = 0; k < 3; k++) {
+        vec[k] = R[i][k] - R[j][k];
+        vec[k] = vec[k] - par->L*round(par->InvL*vec[k]);
+      }
+      r2 = vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2];
       if (r2 < par->Rc2) {
-        double invR2 = 1.0/r2;
-        double invR6 = invR2*invR2*invR2;
-        double invR12 = invR6*invR6;
-        double Eij = invR12 - invR6;
+        invR2 = 1.0/r2;
+        invR6 = invR2*invR2*invR2;
+        invR12 = invR6*invR6;
+        Eij = invR12 - invR6;
         E += Eij;
-        double Wij = invR12 + Eij;
+        Wij = invR12 + Eij;
         W += Wij;
         Wij *= invR2;
-        double Fijx = Wij*rx;
-        double Fijy = Wij*ry;
-        double Fijz = Wij*rz;
-        F[ix] += Fijx;
-        F[iy] += Fijy;
-        F[iz] += Fijz;
-        F[jx] -= Fijx;
-        F[jy] -= Fijy;
-        F[jz] -= Fijz;
+        for (k = 0; k < 3; k++) {
+          Fijk = Wij*vec[k];
+          F[i][k] += Fijk;
+          F[j][k] -= Fijk;
+        }
       }
     }
   }
@@ -219,42 +203,19 @@ int main( int argc, char *argv[] )  {
   }
   simpar par;
   read_data( &par, filename );
+  nbList list = neighbor_list( threads, par.Rc, par.Rs, par.N, NULL );
+  neighbor_allocate_array( &list, &par.R, TRUE );
+  neighbor_allocate_array( &list, &par.V, TRUE );
+  neighbor_allocate_array( &list, &par.F, TRUE );
   create_configuration( &par );
 
-  nbList list = neighbor_list( threads, par.Rc, par.Rs, par.N, NULL );
-
-  neighbor_list_build( &list, par.L, par.R );
-  compute( &par, &list );
+  compute_all_pairs( &par );
   printf("Energy, Virial = %f %f\n",par.Energy,par.Virial);
 
-  brute_force_compute( &par );
+  if (neighbor_list_outdated( &list, par.R, par.N, NULL ))
+    neighbor_list_build( &list, par.L, par.R );
   printf("Energy, Virial = %f %f\n",par.Energy,par.Virial);
 
-/*  if (neighbor_list_outdated( &list, par.R, par.N, NULL ))*/
-    
-/*  printf("%d\n", test );*/
-
-/*
-  tEmDee md = EmDee_system( threads, 1, par.Rc, par.Rs, par.N, NULL, NULL );
-  void* lj = EmDee_pair_lj_cut( 1.0, 1.0 );
-  EmDee_set_pair_model( md, 1, 1, lj );
-
-  EmDee_upload( &md, "box", &par.L );
-  EmDee_upload( &md, "coordinates", par.R );
-  EmDee_upload( &md, "momenta", par.V );
-  EmDee_random_momenta( &md, par.Temp, 1, par.seed );
-
-  printf("%d %lf %lf\n", 0, md.Potential, md.Virial);
-  for (int passo = 1; passo <= par.Npassos; passo++) {
-    if (passo % par.Nprop == 0) printf("%d %lf %lf\n", passo, md.Potential, md.Virial);
-    EmDee_boost( &md, 1.0, 0.0, par.Dt_2 );
-    EmDee_move( &md, 1.0, 0.0, par.Dt );
-    EmDee_boost( &md, 1.0, 0.0, par.Dt_2 );
-  }
-  printf("neighbor list builds = %d\n", md.builds);
-  printf("pair time = %f s.\n", md.pairTime);
-  printf("excecution time = %f s.\n", md.totalTime);
-*/
   return EXIT_SUCCESS;
 }
 
