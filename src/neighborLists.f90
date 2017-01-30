@@ -6,7 +6,7 @@ use omp_lib
 
 implicit none
 
-integer, parameter, private :: extra = 2000
+integer, parameter, private :: extra = 500
 
 integer, parameter, private :: ndiv = 2
 integer, parameter, private :: nbcells = 62
@@ -27,6 +27,7 @@ end type tCell
 type, private :: tData
 
   logical :: MonteCarlo                   ! True if Monte Carlo instead of Molecular Dynamics
+  logical :: zeroBasedIndexing            ! True/False if atom indexing starts with 0/1
   integer :: natoms                       ! Number of atoms in the system
   integer :: mcells = 0                   ! Number of cells at each dimension
   integer :: ncells = 0                   ! Total number of cells
@@ -46,8 +47,8 @@ type, private :: tData
   type(tList) :: threadCell               ! List of cells to be dealt with in each parallel thread
 
   integer,     allocatable :: atomCell(:) ! Array containing the current cell of each atom
-  integer,     allocatable :: body(:)     ! Array containing the body index of each atom
-  real(rb),    pointer     :: R0(:)       ! Position of each atom at latest neighbor list building
+  integer,     allocatable :: group(:)    ! Array containing the group index of each atom
+  real(rb),    allocatable :: R0(:,:)     ! Position of each atom at latest neighbor list building
   type(tCell), allocatable :: cell(:)     ! Array containing all neighbor cells of each cell
   type(tList), allocatable :: neighbor(:) ! Pointer to neighbor lists
 
@@ -56,19 +57,19 @@ end type tData
 type, bind(C) :: tOpts
   logical(lb) :: thirdLaw
   logical(lb) :: jointXYZ
+  logical(lb) :: zeroBase
 end type tOpts
 
 type, bind(C) :: nbList
-  type(c_ptr) :: first                     ! Location of the first neighbor of each atom
-  type(c_ptr) :: last                      ! Location of the last neighbor of each atom
+  type(c_ptr) :: start                     ! Location of the first neighbor of each atom
+  type(c_ptr) :: end                       ! Location of the last neighbor of each atom
   type(c_ptr) :: item                      ! Indices of neighbor atoms
-  type(c_ptr) :: R0                        ! Atom positions at latest neighbor list build
   integer(ib) :: nitems                    ! Number of atoms in neighbor list
   integer(ib) :: nmax                      ! Maximum number of atoms in neighbor list
   integer(ib) :: builds                    ! Number of neighbor list builds
   real(rb)    :: time                      ! Time taken in neighbor list handling
-  type(c_ptr) :: Data                      ! Pointer to system data
   type(tOpts) :: Options                   ! List of options
+  type(c_ptr) :: Data                      ! Pointer to system data
 end type nbList
 
 contains
@@ -77,31 +78,21 @@ contains
 !                                L I B R A R Y   P R O C E D U R E S
 !===================================================================================================
 
-  function neighbor_list( threads, rc, skin, N, body ) bind(C,name="neighbor_list")
+  function neighbor_list( threads, rc, skin, N, group ) bind(C,name="neighbor_list")
     integer(ib), value :: threads, N
     real(rb),    value :: rc, skin
-    type(c_ptr), value :: body
+    type(c_ptr), value :: group
     type(nbList)       :: neighbor_list
 
     integer :: i
 
     type(tData), pointer :: me
-    integer,     pointer :: pbody(:), first(:), last(:)
+    integer,     pointer :: pgroup(:), start(:), end(:), item(:)
 
     ! Allocate data structure:
     allocate( me )
-    allocate( first(N), last(N), source = 0 )
-    neighbor_list % data = c_loc(me)
-    neighbor_list % first = c_loc(first)
-    neighbor_list % last = c_loc(last)
-    neighbor_list % item = c_null_ptr
-    neighbor_list % nitems = 0
-
-    neighbor_list % options % thirdLaw = .true.
-    neighbor_list % options % jointXYZ = .true.
-
-    allocate( me%R0(3*N), source = zero )
-    neighbor_list % R0 = c_loc(me%R0(1))
+    allocate( start(N), end(N), item(N), source = 0 )
+    allocate( me%R0(3,N), source = zero )
 
     ! Set up fixed entities:
     me%nthreads = threads
@@ -113,12 +104,12 @@ contains
     me%natoms = N
     me%threadAtoms = (N + threads - 1)/threads
 
-    ! Set up body:
-    if (c_associated(body)) then
-      call c_f_pointer( body, pbody, [N] )
-      allocate( me%body(N), source = pbody )
+    ! Set up group:
+    if (c_associated(group)) then
+      call c_f_pointer( group, pgroup, [N] )
+      allocate( me%group(N), source = pgroup )
     else
-      allocate( me%body(N), source = [(i,i=1,N)] )
+      allocate( me%group(N), source = [(i,i=1,N)] )
     end if
 
     ! Initialize counters and other mutable entities:
@@ -131,28 +122,53 @@ contains
     allocate( me%neighbor(threads) )
     call me % neighbor % allocate( extra, N )
 
+    ! Deploy data structure:
+    neighbor_list % data = c_loc(me)
+    neighbor_list % start = c_loc(start(1))
+    neighbor_list % end = c_loc(end(1))
+    neighbor_list % item = c_loc(item(1))
+    neighbor_list % nitems = N
+    neighbor_list % nmax = N
+    neighbor_list % builds = 0
+    neighbor_list % time = zero
+    neighbor_list % options % thirdLaw = .true.
+    neighbor_list % options % jointXYZ = .true.
+    neighbor_list % options % zeroBase = .true.
+
   end function neighbor_list
 
 !===================================================================================================
 
-  function neighbor_list_outdated( list, positions ) bind(C,name="neighbor_list_outdated")
+  function neighbor_list_outdated( list, coords, N, atoms ) bind(C,name="neighbor_list_outdated")
     type(nbList), intent(inout) :: list
-    type(c_ptr),  value         :: positions
+    real(rb),     intent(in)    :: coords(*)
+    integer(ib),  value         :: N
+    integer(ib),  intent(in)    :: atoms(*)
     logical(lb)                 :: neighbor_list_outdated
 
-    type(tData),  pointer :: me
-    real(rb),     pointer :: R(:)
-    real(rb), allocatable :: delta(:,:)
+    integer  :: j, index(N)
+    real(rb) :: R(3,N)
+    type(tData), pointer :: me
 
     call c_f_pointer( list%data, me )
-    call c_f_pointer( positions, R, [3*me%natoms] )
-    allocate( delta(3,me%natoms) )
-    if (list % options % jointXYZ) then
-      delta = reshape( R - me%R0, [3,me%natoms] )
+
+    if (N == me%natoms) then
+      if (list % options % jointXYZ) then
+        R = reshape(coords(1:3*N), [3,N])
+      else
+        R = transpose(reshape(coords(1:3*N), [N,3]))
+      end if
+      neighbor_list_outdated = maximum_approach_sq( N, R - me%R0 ) > me%skinSq
     else
-      delta = transpose(reshape( R - me%R0, [me%natoms,3] ))
+      index = atoms(1:N)
+      if (list % options % zeroBase) index = index + 1
+      if (list % options % jointXYZ) then
+        forall (j=1:N) R(:,j) = coords(3*(index(j)-1)+1:3*index(j))
+      else
+        forall (j=1:3) R(j,:) = coords(me%natoms*(j-1)+index)
+      end if
+      neighbor_list_outdated = maximum_approach_sq( N, R - me%R0(:,index) ) > me%skinSq
     end if
-    neighbor_list_outdated = maximum_approach_sq( me%natoms, delta ) > me%skinSq
 
   end function neighbor_list_outdated
 
@@ -166,31 +182,33 @@ contains
 
     integer  :: M, i, n
     real(rb) :: invL, time
-    integer, allocatable  :: neighbors(:,:)
-    integer,  pointer     :: first(:), last(:), item(:)
-    real(rb), pointer     :: R(:)
+
+    integer,  allocatable :: neighbors(:,:)
     real(rb), allocatable :: Rs(:,:)
-    type(tData),  pointer :: me
+
+    integer,     pointer :: start(:), end(:), item(:)
+    real(rb),    pointer :: R(:,:)
+    type(tData), pointer :: me
 
     list%time = list%time - omp_get_wtime()
 
     call c_f_pointer( list%data, me )
-    call c_f_pointer( positions, R, [3*me%natoms] )
-    call c_f_pointer( list%first, first, [me%natoms] )
-    call c_f_pointer( list%last, last, [me%natoms] )
-    call c_f_pointer( list%item, item, [list%nmax] )
     allocate( Rs(3,me%natoms), neighbors(me%natoms,me%nthreads) )
+
+    if (list % options % jointXYZ) then
+      call c_f_pointer( positions, R, [3,me%natoms] )
+      me%R0 = R
+    else
+      call c_f_pointer( positions, R, [me%natoms,3] )
+      me%R0 = transpose( R )
+    end if
+    invL = one/Lbox
+    Rs = invL*me%R0
+
     me%MonteCarlo = .not.list%options%thirdLaw
+    me%zeroBasedIndexing = list%options%zeroBase
 
     list%builds = list%builds + 1
-    me%R0 = R
-
-    invL = one/Lbox
-    if (list%options%jointXYZ) then
-      Rs = reshape(invL*R,[3,me%natoms])
-    else
-      Rs = transpose(reshape(invL*R,[me%natoms,3]))
-    end if
 
     M = floor(ndiv*Lbox/me%xRc)
     call distribute_atoms( me, max(M,2*ndiv+1), Rs )
@@ -204,25 +222,34 @@ contains
     end block
     !$omp end parallel
 
+    call c_f_pointer( list%start, start, [me%natoms] )
+    call c_f_pointer( list%end, end, [me%natoms] )
     n = 0
     do i = 1, me%natoms
-      first(i) = n + 1
+      start(i) = n + 1
       n = n + sum(neighbors(i,:))
-      last(i) = n
+      end(i) = n
     end do
+    if (list%nmax < n) call reallocate_item_array( n )
     list%nitems = n
+    call c_f_pointer( list%item, item, [n] )
 
-    if (list%nmax < n) then
-      deallocate( item )
-      allocate( item(n) )
-      list%nmax = n
-      list%item = c_loc(item)
-    end if
-
-    call deploy_neighbor_list( me, first, item )
+    call deploy_neighbor_list( me, start, end, item )
 
     time = omp_get_wtime()
     list%time = list%time + time
+
+    contains
+
+      subroutine reallocate_item_array( n )
+        integer, intent(in) :: n
+        integer, pointer :: aux(:)
+        call c_f_pointer( list%item, aux, [list%nmax] )
+        deallocate( aux )
+        allocate( aux(n) )
+        list%item = c_loc(aux(1))
+        list%nmax = n
+      end subroutine reallocate_item_array
 
   end subroutine neighbor_list_build
 
@@ -257,31 +284,34 @@ contains
 
 !===================================================================================================
 
-  subroutine deploy_neighbor_list( me, first, item )
+  subroutine deploy_neighbor_list( me, start, end, item )
     type(tData), intent(inout) :: me
-    integer,     intent(in)    :: first(me%natoms)
+    integer,     intent(inout) :: start(me%natoms), end(me%natoms)
     integer,     intent(out)   :: item(:)
 
     integer :: position(me%natoms)
 
-    position = first - 1
+    position = start - 1
 
     !$omp parallel num_threads(me%nthreads)
     block
-      integer :: thread, firstAtom, lastAtom, m, i, j, k
+      integer :: thread, first, last, m, i, j, k, n, ipos
       thread = omp_get_thread_num() + 1
 
-      firstAtom = me%cellAtom%first(me%threadCell%first(thread))
-      lastAtom = me%cellAtom%last(me%threadCell%last(thread))
+      first = me%cellAtom%first(me%threadCell%first(thread))
+      last = me%cellAtom%last(me%threadCell%last(thread))
       associate (neighbor => me%neighbor(thread) )
-        do m = firstAtom, lastAtom
+        do m = first, last
           i = me%cellAtom%item(m)
+          n = neighbor%last(i) - neighbor%first(i) + 1
+          !$omp atomic capture
+          ipos = position(i)
+          position(i) = position(i) + n
+          !$omp end atomic
           do k = neighbor%first(i), neighbor%last(i)
             j = neighbor%item(k)
-            !$omp atomic update
-            position(i) = position(i) + 1
-            !$omp end atomic
-            item(position(i)) = j
+            ipos = ipos + 1
+            item(ipos) = j
             if (me%MonteCarlo) then
               !$omp atomic update
               position(j) = position(j) + 1
@@ -291,6 +321,15 @@ contains
           end do
         end do
       end associate
+
+      if (me%zeroBasedIndexing) then
+        first = (thread - 1)*me%threadAtoms + 1
+        last = min(thread*me%threadAtoms, me%natoms)
+        forall (i=start(first):end(last)) item(i) = item(i) - 1
+        start(first:last) = start(first:last) - 1
+        end(first:last) = end(first:last) - 1
+      end if
+
     end block
     !$omp end parallel
 
@@ -433,7 +472,7 @@ contains
     integer,     intent(in)    :: thread
     real(rb),    intent(in)    :: invL, Rs(3,me%natoms)
 
-    integer  :: i, j, k, m, n, icell, jcell, npairs, ibody
+    integer  :: i, j, k, m, n, icell, jcell, npairs, igroup
     integer  :: nlocal, ntotal, first, last
     real(rb) :: xRc2, Rc2, r2
     integer  :: atom(me%maxpairs)
@@ -468,12 +507,12 @@ contains
 
         do k = 1, nlocal
           i = atom(k)
-          ibody = me%body(i)
+          igroup = me%group(i)
           neighbor%first(i) = npairs + 1
           Ri = Rs(:,i)
           do m = k + 1, ntotal
             j = atom(m)
-            if (me%body(j) /= ibody) then
+            if (me%group(j) /= igroup) then
               Rij = Ri - Rs(:,j)
               Rij = Rij - anint(Rij)
               r2 = sum(Rij*Rij)

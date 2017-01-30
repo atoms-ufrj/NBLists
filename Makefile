@@ -53,7 +53,7 @@ src = $(addprefix $(SRCDIR)/, $(addsuffix .f90, $(1)))
 
 OBJECTS = $(call obj,neighborLists lists global)
 
-.PHONY: all clean install uninstall lib include
+.PHONY: all clean install uninstall lib include test
 
 .DEFAULT_GOAL := all
 
@@ -77,6 +77,17 @@ uninstall:
 lib: $(LIBDIR)/libnblists.so
 
 include: $(INCDIR)/nblists.h $(INCDIR)/nblists.f90
+
+test: $(addprefix $(TSTDIR)/,test_c_md)
+	cd $(TSTDIR) && bash run_tests.sh
+
+# Testing executables:
+
+$(TSTDIR)/test_c_md: $(TSTDIR)/test_c_md.c $(INCDIR)/nblists.h $(LIBDIR)/libnblists.so
+	$(CC) $(C_OPTS) -o $@ $(LN_OPTS) $< $(LIBFILE) -lm
+
+$(TSTDIR)/%: $(TSTDIR)/%.c $(INCDIR)/nblists.h $(LIBDIR)/nblists.so
+	$(FORT) $(F_OPTS) -o $@ $(LN_OPTS) -J$(OBJDIR) $< $(LIBFILE)
 
 # Shared library and includes:
 

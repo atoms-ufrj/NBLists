@@ -1,3 +1,6 @@
 include/
 lib/
 src/obj/
+test/test_c_md
+*.gcda
+*.gcno
