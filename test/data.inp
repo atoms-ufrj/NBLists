@@ -1,7 +1,7 @@
 [número de partículas]
 10000
 [distância de corte reduzida]
-2.5
+3.5
 [skin para lista de vizinhos]
 0.3
 [Semente do gerador de números aleatórios]

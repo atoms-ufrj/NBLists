@@ -23,7 +23,7 @@ FAST_C_OPTS = -Ofast
 
 # Option DEBUG:
 DEBUG_F_OPTS = --coverage -g -Og -fcheck=all -Ddebug
-DEBUG_C_OPTS = --coverage -g -Og -fstack-check -fsanitize=null -fbounds-check -Ddebug
+DEBUG_C_OPTS = --coverage -g -Og -fstack-check -fbounds-check -Ddebug
 
 # Checks chosen option:
 ifeq ($(DEBUG), 1)
