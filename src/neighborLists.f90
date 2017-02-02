@@ -163,9 +163,9 @@ contains
 !===================================================================================================
 
   function neighbor_list_outdated( list, coords ) bind(C,name="neighbor_list_outdated")
-    type(nbList), intent(inout) :: list
-    type(c_ptr),  value         :: coords
-    logical(lb)                 :: neighbor_list_outdated
+    type(nbList), value :: list
+    type(c_ptr),  value :: coords
+    logical(lb)         :: neighbor_list_outdated
 
     real(rb),    pointer :: R(:,:)
     type(tData), pointer :: me

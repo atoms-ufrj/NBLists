@@ -36,9 +36,9 @@ interface
 
   function neighbor_list_outdated( list, coords ) bind(C,name="neighbor_list_outdated")
     import
-    type(nbList), intent(inout) :: list
-    type(c_ptr),  value         :: coords
-    logical(lb)                 :: neighbor_list_outdated
+    type(nbList), value :: list
+    type(c_ptr),  value :: coords
+    logical(lb)         :: neighbor_list_outdated
   end function neighbor_list_outdated
 
   subroutine neighbor_list_build( list, Lbox, positions ) bind(C,name="neighbor_list_build")

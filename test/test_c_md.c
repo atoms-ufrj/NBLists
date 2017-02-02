@@ -107,7 +107,7 @@ void compute_pairs( simpar *par, nbList *list )
   int i, j, k, m;
   double **R, **F, E, W, kvec, vec[3], r2, invR2, invR6, invR12, Eij, Wij, Fijk;
 
-  if (neighbor_list_outdated( list, par->R[0]))
+  if (neighbor_list_outdated( *list, par->R[0]))
     neighbor_list_build( list, par->L, par->R[0] );
 
   E = 0.0;
