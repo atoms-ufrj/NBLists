@@ -108,14 +108,15 @@ Using the Library
        indexing (1-based) is to be used, then make zeroBase = 0. */
 
     // Using the library to allocate a contiguous array of coordinates (optional):
-    neighbor_allocate_2d_array( list, &R );
+    _Bool jointXYZ = 1;
+    neighbor_allocate_2d_array( &R, N, jointXYZ );
     ...
 
     // Basic neighbor list usage in Molecular Dynamics:
     if (neighbor_list_outdated( list, R[0] ))
       neighbor_list_build( &list, L, R[0] );
     for (int i = 0; i < N; i++)
-      for (int k = list.start[i]; k < list.end[i]; k++) {
+      for (int k = list.start[i]; k <= list.end[i]; k++) {
         int j = list.item[k];
         // Compute interaction of pair i-j
         ...

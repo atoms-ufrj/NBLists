@@ -15,7 +15,7 @@ typedef struct {
 } nbList;
 
 nbList neighbor_list( int threads, double rc, double skin, int N, int* group );
-void   neighbor_allocate_2d_array( nbList list, double*** array );
+void   neighbor_allocate_2d_array( double*** array, int N, _Bool jointXYZ );
 _Bool  neighbor_list_outdated( nbList list, double* coords );
 void   neighbor_list_build( nbList* list, double L, double* coords );
 

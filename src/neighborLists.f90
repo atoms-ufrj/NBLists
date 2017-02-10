@@ -139,22 +139,22 @@ contains
 
 !===================================================================================================
 
-  subroutine neighbor_allocate_2d_array( list, array ) bind(C,name="neighbor_allocate_2d_array")
-    type(nbList), value         :: list
+  subroutine neighbor_allocate_2d_array( array, N, jointXYZ ) &
+    bind(C,name="neighbor_allocate_2d_array")
     type(c_ptr),  intent(inout) :: array
+    integer(ib),  value         :: N
+    logical(lb),  value         :: jointXYZ
 
     integer :: i
-    type(tData), pointer :: me
     real(rb),    pointer :: R(:,:)
     type(c_ptr), pointer :: ptr(:)
 
-    call c_f_pointer( list%data, me )
-    if (list % options % jointXYZ) then
-      allocate( R(3,me%natoms), ptr(me%natoms) )
-      forall (i=1:me%natoms) ptr(i) = c_loc(R(1,i))
+    if (jointXYZ) then
+      allocate( R(3,N), ptr(N) )
+      forall (i=1:N) ptr(i) = c_loc(R(1,i))
     else
-      allocate( R(me%natoms,3), ptr(3) )
-      forall (i=1:me%natoms) ptr(i) = c_loc(R(i,1))
+      allocate( R(N,3), ptr(3) )
+      forall (i=1:N) ptr(i) = c_loc(R(i,1))
     end if
     array = c_loc(ptr(1))
 
